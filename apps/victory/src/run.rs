@@ -36,6 +36,10 @@ fn check_cpu_features() -> Result<()> {
 }
 
 #[cfg(windows)]
+#[path = "scale.rs"]
+mod scale;
+
+#[cfg(windows)]
 pub fn run(
     exe: &Path,
     unimplemented: Unimplemented,
@@ -54,14 +58,21 @@ pub fn run(
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let prepared = victory_loader::prepare(&original)?;
+    let mut prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
     match victory_game::identify(&hash) {
         Some(build) => println!("build          {} ({hash})", build.label),
         None => println!("build          unknown ({hash})"),
     }
 
-    let images = cfg.cache_subdir("images")?;
+    // A patched image is mapped from a copy of its own, beside the others.
+    let images = match scale::apply(&mut prepared, hash.as_str())? {
+        Some(scale) => {
+            println!("render scale   {scale} of the output (VICTORY_RENDER_SCALE)");
+            cfg.cache_subdir(&format!("images-scale-{:08x}", scale.to_bits()))?
+        }
+        None => cfg.cache_subdir("images")?,
+    };
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let image = victory_loader::load(&prepared, &images)?;
     // The program is mapped from the copy `load` wrote: the file's bytes

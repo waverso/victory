@@ -789,8 +789,20 @@ fn log_memory() {
         mb(card[3]),
     );
     {
-        let [textures, staging] = crate::pool::memory();
+        let [texture_pool, staging_pool] = crate::pool::memory();
+        let (textures, staging) = (texture_pool.total >> 20, staging_pool.total >> 20);
         tracing::info!("memory in blocks (VICTORY_TEXTURE_POOL=0 turns them off): {textures} MB of textures, {staging} MB of their staging buffers");
+        for (pool, usage) in [("textures", texture_pool), ("staging", staging_pool)] {
+            tracing::info!(
+                pool,
+                reserved_mib = mb(usage.total),
+                live_mib = mb(usage.live()),
+                empty_mib = mb(usage.empty),
+                resting_mib = mb(usage.resting),
+                partial_free_mib = mb(usage.partial_free),
+                "texture pool usage"
+            );
+        }
     }
     let targets = crate::resource::targets_census();
     tracing::info!(

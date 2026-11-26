@@ -301,6 +301,21 @@ impl<B: Clone> Pool<B> {
     fn blocks(&self) -> usize {
         self.blocks.iter().flatten().count()
     }
+
+    #[cfg(feature = "diagnostics")]
+    fn usage(&self) -> Usage {
+        let mut usage = Usage::default();
+        for block in self.blocks.iter().flatten() {
+            usage.total += BLOCK;
+            if block.free.whole(BLOCK) {
+                usage.empty += BLOCK;
+            } else {
+                usage.partial_free += block.free.0.values().sum::<u64>();
+            }
+        }
+        usage.resting = self.resting.iter().map(|(_, piece)| piece.len).sum();
+        usage
+    }
 }
 
 /// A mapped upload buffer's memory.
@@ -325,10 +340,27 @@ pub(crate) fn texture_room() -> u64 {
     (lock(&TEXTURES).blocks() as u64 * BLOCK).saturating_sub(HELD.load(Ordering::Relaxed))
 }
 
-/// For the memory line: blocks of textures and of staging buffers, in MiB.
 #[cfg(feature = "diagnostics")]
-pub(crate) fn memory() -> [u64; 2] {
-    [lock(&TEXTURES).blocks() as u64 * (BLOCK >> 20), lock(&STAGING).blocks() as u64 * (BLOCK >> 20)]
+#[derive(Default)]
+pub(crate) struct Usage {
+    pub total: u64,
+    pub empty: u64,
+    pub resting: u64,
+    pub partial_free: u64,
+}
+
+#[cfg(feature = "diagnostics")]
+impl Usage {
+    pub fn live(&self) -> u64 {
+        self.total - self.empty - self.resting - self.partial_free
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn memory() -> [Usage; 2] {
+    let textures = lock(&TEXTURES).usage();
+    let staging = lock(&STAGING).usage();
+    [textures, staging]
 }
 
 /// Part of a block of mapped upload memory, back in the pool when dropped.

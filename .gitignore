@@ -24,6 +24,7 @@
 /extracted/
 /cache/
 /out/
+/logs/
 
 # Executables, libraries, symbols
 *.exe

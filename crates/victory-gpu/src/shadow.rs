@@ -1251,25 +1251,32 @@ mod relay_tests {
 }
 
 /// Snapshot memory kept for reuse (already touched, so no page faults).
-static POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+struct SnapshotPool {
+    buffers: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
+static POOL: Mutex<SnapshotPool> = Mutex::new(SnapshotPool { buffers: Vec::new(), bytes: 0 });
 
 /// An empty buffer with room for `n` bytes, from the pool if it has one
 /// of about that size: a small copy's snapshot took the 174 MB buffer kept
 /// for the big heap's, which then got another, until eight of them were
 /// reserved (1.4 GB in run 24).
 fn pooled(n: usize) -> Vec<u8> {
-    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
     let most = n.saturating_mul(4).max(1 << 20);
-    let fit = pool
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.capacity() >= n && v.capacity() <= most)
-        .min_by_key(|(_, v)| v.capacity())
-        .map(|(i, _)| i);
-    let mut v = match fit {
-        Some(i) => pool.swap_remove(i),
-        None => Vec::with_capacity(n),
+    let reused = {
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        pool.buffers
+            .partition_point(|v| v.capacity() >= n)
+            .checked_sub(1)
+            .filter(|&i| pool.buffers[i].capacity() <= most)
+            .map(|i| {
+                let v = pool.buffers.remove(i);
+                pool.bytes -= v.capacity();
+                v
+            })
     };
+    let mut v = reused.unwrap_or_else(|| Vec::with_capacity(n));
     v.clear();
     v
 }
@@ -1293,21 +1300,26 @@ fn snapshots_kept() -> usize {
 /// bytes in all.
 fn give_back(v: Vec<u8>) {
     const KEPT: usize = 512 << 20;
-    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    pool.push(v);
-    pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
-    let (mut kept, mut total) = (0, 0usize);
-    for v in pool.iter().take(snapshots_kept()) {
-        total = total.saturating_add(v.capacity());
-        if kept > 0 && total > KEPT {
-            break;
+    let limit = snapshots_kept();
+    let capacity = v.capacity();
+    let mut gone = Vec::new();
+    {
+        let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+        let at = pool.buffers.partition_point(|v| v.capacity() >= capacity);
+        if at >= limit {
+            return;
         }
-        kept += 1;
+        if at > 0 && at == pool.buffers.len() && capacity > KEPT.saturating_sub(pool.bytes) {
+            return;
+        }
+        pool.buffers.insert(at, v);
+        pool.bytes += capacity;
+        while pool.buffers.len() > limit || (pool.bytes > KEPT && pool.buffers.len() > 1) {
+            let v = pool.buffers.pop().unwrap();
+            pool.bytes -= v.capacity();
+            gone.push(v);
+        }
     }
-    // (Given back to the kernel without the lock: milliseconds.)
-    let gone = pool.split_off(kept);
-    drop(pool);
-    drop(gone);
 }
 
 const NOT_WATCHED: u8 = 2;
@@ -2856,7 +2868,7 @@ pub(crate) fn memory() -> [u64; 6] {
     };
     let (kept, kept_bytes) = {
         let pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-        (pool.len() as u64, pool.iter().map(|v| v.capacity() as u64).sum::<u64>())
+        (pool.buffers.len() as u64, pool.bytes as u64)
     };
     [
         LIVE[0].load(Ordering::Relaxed),
